@@ -1,0 +1,505 @@
+---
+title: "Data XChange: Visualization"
+output:
+  html_document:
+    df_print: paged
+---
+
+
+
+```{r, include = FALSE}
+
+# Clear enivronment
+rm(list = ls())
+
+# devtools::install_github("kent37/summarywidget")
+
+# Load packages
+packages <- c(
+  "tidyverse", "stringr", "plotly", "crosstalk", "htmltools", "DT", "summarywidget"
+)
+
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org/", dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+
+
+```
+
+```{r, include = FALSE}
+# ---- Read in data ----
+raw_df <- read_csv("../../Data/acs_data.csv")
+
+clean_acs_metadata <- function(df) {
+  
+  df_clean <- df %>%
+    rename(variable = name) %>%
+    
+    mutate(
+      label_clean = label %>%
+        str_remove("^Estimate!!") %>%
+        str_replace_all("!!", "_") %>%
+        str_replace_all("[^A-Za-z0-9_ ]", "") %>%
+        str_replace_all(" +", "_") %>%
+        str_to_lower(),
+      
+      concept_clean = concept %>%
+        str_to_lower() %>%
+        str_replace_all("[^a-z0-9 ]", "") %>%
+        str_replace_all(" +", "_"),
+      
+      varname = paste0(concept_clean, "_", label_clean),
+    ) %>%
+  
+    select(geoid, state, varname, estimate) %>%
+    
+    pivot_wider(
+      id_cols = c(geoid, state),
+      names_from = varname,
+      values_from = estimate
+    ) %>%
+    
+    relocate(geoid, state) %>%
+    select(-`NA_NA`)
+  
+  return(df_clean)
+}
+
+acs_wide <- clean_acs_metadata(raw_df)
+
+```
+
+
+```{r, include = FALSE}
+# ---- Data exploration ----
+
+# Structural
+nrow(acs_wide); ncol(acs_wide)
+names(acs_wide)
+glimpse(acs_wide)
+
+# Missingness
+colSums(is.na(acs_wide))
+
+# Duplicates
+sum(duplicated(acs_wide$geoid))
+
+# Value checks
+summary(acs_wide)
+
+# Categorical checks
+table(acs_wide$state)
+
+
+# ---- New variables ----
+
+# Create pct_white, pct_black, pct_asian, pct_hisp, pct_owner, and pct_renter variables
+acs_wide <- acs_wide %>%
+  mutate(
+    pct_white   = race_total_white_alone / race_total,
+    pct_black   = race_total_black_or_african_american_alone / race_total,
+    pct_asian   = race_total_asian_alone / race_total,
+    pct_hisp    = hispanic_or_latino_origin_total_hispanic_or_latino / hispanic_or_latino_origin_total,
+    pct_owner   = tenure_total_owner_occupied / tenure_total,
+    pct_renter  = tenure_total_renter_occupied / tenure_total,
+  )
+
+# Age groups are extremely granular. Bucket them into children (0 - 17), adult (18 - 64), and seniors (65 +)
+
+acs_wide <- acs_wide %>%
+  mutate(
+    age_children = rowSums(
+      select(., matches("sex_by_age_total_(male|female)_(under_5|5_to_9|10_to_14|15_to_17)_years$")),
+      na.rm = TRUE
+    ),
+    age_adults = rowSums(
+      select(., matches("sex_by_age_total_(male|female)_(18_and_19|20|21|22_to_24|25_to_29|30_to_34|35_to_39|40_to_44|45_to_49|50_to_54|55_to_59|60_and_61|62_to_64)_years$")),
+      na.rm = TRUE
+    ),  
+    age_seniors = rowSums(
+      select(., matches("sex_by_age_total_(male|female)_(65_and_66|67_to_69|70_to_74|75_to_79|80_to_84|85_years_and_older)")),
+      na.rm = TRUE      
+    )
+  )
+
+# Add pct_seniors for summary box
+acs_wide <- acs_wide %>%
+  mutate(pct_seniors = age_seniors / sex_by_age_total * 100)
+
+# Add largest_race 
+acs_wide <- acs_wide %>%
+  rowwise() %>%
+  mutate(
+    largest_race = c("White", "Black", "Asian", "Hispanic")[
+      which.max(c(pct_white, pct_black, pct_asian, pct_hisp))
+    ]
+  ) %>%
+  ungroup()
+
+# Order largest_race
+acs_wide <- acs_wide %>%
+  mutate(
+    largest_race = factor(
+      largest_race,
+      levels = c("White", "Black", "Asian", "Hispanic"),
+      ordered = TRUE
+    )
+  )
+
+# Add total population size (categorical buckets)
+acs_wide <- acs_wide %>%
+  mutate(
+    pop_bucket = case_when(
+      sex_by_age_total < 1000000   ~ "< 1M",
+      sex_by_age_total < 3000000   ~ "1M–3M",
+      sex_by_age_total < 7000000   ~ "3M–7M",
+      sex_by_age_total < 15000000  ~ "7M–15M",
+      TRUE                        ~ "15M+"
+    )
+  )
+
+acs_wide <- acs_wide %>%
+  mutate(
+    pop_bucket = factor(
+      pop_bucket,
+      levels = c("< 1M", "1M–3M", "3M–7M", "7M–15M", "15M+"),
+      ordered = TRUE
+    )
+  )
+
+# Keep race colors the same throughout
+race_colors <- c(
+  "White"    = "#1f77b4",  # blue
+  "Asian"    = "#2ca02c",  # green
+  "Black"    = "#ff7f0e",  # orange
+  "Hispanic" = "#d62728"   # red
+)
+
+acs_wide <- acs_wide %>%
+  mutate(
+    pct_rent_50_plus =
+      gross_rent_as_a_percentage_of_household_income_in_the_past_12_months_total_500_percent_or_more /
+      gross_rent_as_a_percentage_of_household_income_in_the_past_12_months_total
+  )
+
+
+acs_wide <- acs_wide %>%
+  mutate(
+    state_id = state.abb[match(state, state.name)]
+  )
+
+# Custom lookup for states + DC + territories
+state_lookup <- c(
+  setNames(state.abb, state.name),   # the 50 states
+  "District of Columbia" = "DC",
+  "Puerto Rico" = "PR",
+  "Guam" = "GU",
+  "American Samoa" = "AS",
+  "U.S. Virgin Islands" = "VI",
+  "Northern Mariana Islands" = "MP"
+)
+
+acs_wide <- acs_wide %>%
+  mutate(
+    state_id = state_lookup[state]
+  )
+
+```
+
+# Building Standalone Interactive Dashboards with Crosstalk {.tabset}
+
+```{r, echo = FALSE}
+
+# Objects required for Overview tab
+
+# Crosstalk requires a shared data object. 
+sd <- SharedData$new(acs_wide, key = ~geoid, group = "state_group")
+
+# Filter: State dropdown ----
+state_filter <- filter_select(
+  id = "state_filter",
+  label = "Select a State:",
+  sharedData = sd,
+  group = ~state
+)
+
+# ---- Additional Filters: Race Group + Population Size ----
+
+# Filter: largest race group (White / Black / Asian / Hispanic)
+race_group_filter <- filter_select(
+  id = "race_group_filter",
+  label = "Largest Race Group:",
+  sharedData = sd,
+  group = ~largest_race
+  )
+
+# Filter: population size
+pop_filter <- filter_select(
+  id = "pop_filter",
+  label = "Population Size:",
+  sharedData = sd,
+  group = ~pop_bucket
+)
+
+# Summary box: % Senior 
+summary_box_reactive <- htmltools::div(
+  style = "
+    background:#eef3f7;
+    padding:18px;
+    border-radius:8px;
+    font-size:18px;
+    width:95%;
+    margin-top:10px;
+    text-align: center;
+  ",
+  htmltools::strong("% Senior Population:"),
+  htmltools::tags$div(
+    summarywidget(sd, statistic = 'mean', "pct_seniors", digits = 1),
+    style="font-size: 2.4em; font-weight: 700; margin-top: 10px;"
+  )
+)
+
+# Bar chart: Race 
+race_plot <- sd %>%
+  plot_ly(
+    x = ~state,
+    y = ~race_total_white_alone,
+    type = "bar",
+    name = "White",
+    marker = list(color = race_colors["White"])
+  ) %>%
+  add_bars(
+    y = ~race_total_black_or_african_american_alone,
+    name = "Black",
+    marker = list(color = race_colors["Black"])
+  ) %>%
+  add_bars(
+    y = ~race_total_asian_alone,
+    name = "Asian",
+    marker = list(color = race_colors["Asian"])
+  ) %>%
+  add_bars(
+    y = ~hispanic_or_latino_origin_total_hispanic_or_latino,
+    name = "Hispanic",
+    marker = list(color = race_colors["Hispanic"])
+  ) %>%
+    highlight(
+    on = "plotly_selected",
+    off = "plotly_deselect",
+    dynamic = FALSE,
+    selected = attrs_selected(showlegend = FALSE)
+    ) %>%
+  layout(
+    barmode = "stack",
+    # title = "Race Distribution (Absolute Counts)",
+    xaxis = list(title = ""),
+    yaxis = list(title = "Population", tickformat = ".2s"),
+    legend = list(
+      title = list(text = "<b>Race<b>"),
+      orientation = "v")
+    ) 
+
+# Scatterplot: relationship between % race and % owners
+race_owner_scatter <- sd %>%
+  plot_ly(
+    x = ~pct_white,
+    y = ~pct_owner,
+    type = "scatter",
+    mode = "markers",
+    color = ~largest_race,
+    colors = race_colors,
+    marker = list(size = 10),
+    customdata = ~state,
+    hovertemplate =
+      paste0(
+        "State: %{customdata}<br>",
+        "% White: %{x:.1%}<br>",
+        "% Owner-Occupied: %{y:.1%}<extra></extra>"
+      )
+    ) %>%
+  highlight(
+    on = "plotly_selected",
+    off = "plotly_deselect",
+    dynamic = FALSE,
+    selected = attrs_selected(showlegend = FALSE)
+    ) %>%
+  layout(
+    # title = "Owner-Occupied Rate vs % White",
+    xaxis = list(
+      title = "% White",
+      tickformat = "0%",
+      range = c(0,1)
+    ),
+    yaxis = list(
+      title = "% Owner-Occupied",
+      tickformat = "0%",
+      range = c(0,1)
+    ),
+    legend = list(
+      title = list(text = "<b>Largest Race Group<b>"),
+      orientation = "v"
+    )
+  )
+
+# Table: first, we need a new SharedData object to be able to select the variables of interest
+# HOw does this still work? both `SharedData` objects use the same group and key
+# As long as they share the same group + key, they stay synchronized
+sd_table <- SharedData$new(
+  acs_wide %>%
+    select(
+      geoid,        # keep key for linking
+      state,
+      pct_owner,
+      pop_bucket,
+      pct_white,
+      largest_race
+    ),
+  key   = ~geoid,
+  group = "state_group"
+)
+
+race_owner_table <- sd_table %>%
+  datatable(
+    # caption = htmltools::tags$strong("Summary Table: Ownership and Race Metrics"),
+    options = list(
+      pageLength = 10, 
+      scrollX = TRUE),
+    rownames = FALSE
+  ) %>%
+  formatPercentage(
+    columns = c("pct_owner", "pct_white"),
+    digits = 1
+  )
+
+```
+
+
+## Overview
+```{r, echo = FALSE}
+bscols(
+  widths = c(3, 9),
+  list(
+    h3("Filters"),
+    state_filter,
+    br(),
+    race_group_filter,
+    br(),
+    pop_filter,
+    br(),
+    summary_box_reactive
+  ),
+  list(
+    h3("State Race Composition"),
+    race_plot,
+    h3("Owner-Occupied Race vs % White (select a point!)"),
+    race_owner_scatter,
+    h3("Summary Table for Selected States"),
+    race_owner_table
+  )
+)
+```
+
+## Housing
+
+```{r, echo = FALSE}
+
+# Bar chart: owner vs renter
+owner_renter_plot <- sd %>%
+  plot_ly(
+    x = ~state,
+    y = ~pct_owner,
+    type = "bar",
+    name = "% Owner",
+    marker = list(color = "#1f77b4")
+  ) %>%
+  add_bars(
+    y = ~pct_renter,
+    name = "% Renter",
+    marker = list(color = "#ff7f0e")
+  ) %>%
+  highlight(
+    on = "plotly_selected",
+    off = "plotly_deselect",
+    dynamic = FALSE,
+    selected = attrs_selected(showlegend = FALSE)
+    ) %>%
+  layout(
+    barmode = "group",
+    xaxis = list(title = ""),
+    yaxis = list(title = "Percent", tickformat = "0%"),
+    legend = list(title = list(text = "<b>Housing Tenure</b>"))
+  )
+
+
+# SharedData object for housing visuals
+sd_housing <- SharedData$new(
+  acs_wide,
+  key = ~geoid,
+  group = "state_group"
+)
+
+# Choropleth for rent burden
+choropleth_50_plus <- sd_housing %>%
+  plot_ly(
+    type = "choropleth",
+    locations = ~state_id,          # must be 2-letter codes
+    locationmode = "USA-states",
+    z = ~pct_rent_50_plus,
+    colorscale = "Reds",
+    zmin = 0.15,                     # based on your summary stats
+    zmax = 0.28,
+    colorbar = list(
+      title = "Rent ≥50% of Income",
+      tickformat = "0%"
+    ),
+    hovertemplate = paste0(
+      "State: %{location}<br>",
+      "% Severely Rent Burdened: %{z:.1%}<extra></extra>"
+    )
+  ) %>%
+  layout(
+   #  title = "Share of Severely Rent-Burdened Households (50%+ of Income)",
+    geo = list(scope = "usa")
+  )
+
+hud_footnote <- htmltools::HTML(
+  "<p style='font-size: 0.85em; color: #555; margin-top: 6px;'>
+    <strong>Note:</strong> According to the U.S. Department of Housing and Urban Development (HUD), 
+    households spending <b>30% or more</b> of income on housing are considered <em>cost burdened</em>, 
+    and those spending <b>50% or more</b> are considered <em>severely cost burdened</em>. 
+    The metric shown reflects the share of renters paying at least 50% of income toward rent and utilities.
+   </p>"
+)
+
+```
+
+```{r, echo = FALSE}
+bscols(
+  widths = c(3, 9),
+  list(
+    h3("Filters"),
+    state_filter,
+    br(),
+    race_group_filter,
+    br(),
+    pop_filter
+  ),
+  list(
+    h3("Owner vs Renter Composition"),
+    owner_renter_plot,
+    br(), br(),
+    h3("Share of Severely Rent-Burdened Households"),
+    choropleth_50_plus,
+    hud_footnote
+  )
+)
+
+```
+
+
+
+
+
