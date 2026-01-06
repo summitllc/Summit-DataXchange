@@ -1,0 +1,369 @@
+---
+title: "Building Standalone Interactive Dashboards with Crosstalk: Assignment"
+output:
+  html_document:
+    df_print: paged
+  html_notebook: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r}
+knitr::opts_knit$set(self_contained = FALSE)
+knitr::opts_knit$set(browser = TRUE)
+```
+
+### 1. Data Import, Cleaning, and Exploration
+
+**a. Install and load the following packages:**
+
+- `tidyverse`
+- `stringr`
+- `plotly`
+- `crosstalk`
+- `htmltools`
+- `DT`
+
+```{r 1_load_packages, include = TRUE, echo = TRUE, message=FALSE, warning=FALSE}
+# Clear environment
+rm(list = ls())
+
+# Load packages
+packages <- c(
+  "tidyverse", "stringr", "plotly", "crosstalk", "htmltools", "DT"
+)
+
+for (pkg in packages) {
+  if (!require(pkg, character.only = TRUE)) {
+    install.packages(pkg, repos = "https://cloud.r-project.org/", dependencies = TRUE)
+    library(pkg, character.only = TRUE)
+  }
+}
+```
+
+```{r, results='asis', echo=FALSE}
+htmltools::tags$script(HTML("
+  console.log('All Crosstalk variables:');
+  for (var k in crosstalk.vars) {
+    console.log(k);
+  }
+"))
+```
+
+**b. Import the ACS dataset** into your R Markdown or R Notebook.
+
+``` {r 1_load_data, include = TRUE, echo=TRUE, message = FALSE, warning = FALSE}
+raw_df <- read_csv("../../Data/acs_data.csv")
+```
+
+**c. Clean the dataset** using the `clean_acs_metadata()` function provided below.
+
+```{r 1_clean_data, include = TRUE, echo = FALSE, message = FALSE, warning = FALSE}
+clean_acs_metadata <- function(df) {
+  
+  df_clean <- df %>%
+    rename(variable = name) %>%
+    
+    mutate(
+      label_clean = label %>%
+        str_remove("^Estimate!!") %>%
+        str_replace_all("!!", "_") %>%
+        str_replace_all("[^A-Za-z0-9_ ]", "") %>%
+        str_replace_all(" +", "_") %>%
+        str_to_lower(),
+      
+      concept_clean = concept %>%
+        str_to_lower() %>%
+        str_replace_all("[^a-z0-9 ]", "") %>%
+        str_replace_all(" +", "_"),
+      
+      varname = paste0(concept_clean, "_", label_clean),
+    ) %>%
+  
+    select(geoid, state, varname, estimate) %>%
+    
+    pivot_wider(
+      id_cols = c(geoid, state),
+      names_from = varname,
+      values_from = estimate
+    ) %>%
+    
+    relocate(geoid, state) %>%
+    select(-`NA_NA`)
+  
+  return(df_clean)
+}
+
+acs_wide <- clean_acs_metadata(raw_df)
+
+```
+
+**d. Explore the data by answering the following questions:**
+
+1. What are the dimensions of the dataset (number of rows and columns)?  
+2. What are several example column names? Are they understandable?  
+3. Which variable should be used as the unique identifier going forward (for filtering and Crosstalk keys)?
+
+
+```{r 1_explore_data, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE}
+# Dimensions
+nrow(acs_wide); ncol(acs_wide)
+
+# Columms
+names(acs_wide)
+
+# Value checks: not printing here, but this will show summary stats for all variables
+# summary(acs_wide)
+
+# Check duplicates on geoid / state
+sum(duplicated(acs_wide$geoid))
+sum(duplicated(acs_wide$state))
+
+# Categorical checks
+table(acs_wide$state)
+```
+
+### 2. Variable Creation
+
+**a. Create new percentage race variables:**
+
+- `pct_white`
+- `pct_black`
+- `pct_asian`
+- `pct_hisp`
+
+**b. Create percentage housing tenure variables:**
+
+- `pct_owner`
+- `pct_renter`
+
+```{r 2_race_housing_vars, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE}
+# Create pct_white, pct_black, pct_asian, pct_hisp, pct_owner, and pct_renter variables
+acs_wide <- acs_wide %>%
+  mutate(
+    pct_white   = race_total_white_alone / race_total,
+    pct_black   = race_total_black_or_african_american_alone / race_total,
+    pct_asian   = race_total_asian_alone / race_total,
+    pct_hisp    = hispanic_or_latino_origin_total_hispanic_or_latino / hispanic_or_latino_origin_total,
+    pct_owner   = tenure_total_owner_occupied / tenure_total,
+    pct_renter  = tenure_total_renter_occupied / tenure_total
+  )
+```
+
+**c. Create age bucket variables (using the code provided below):**
+
+- `age_children` (0–17)  
+- `age_adults` (18–64)  
+- `age_seniors` (65+)
+
+```{r 2_age vars, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE}
+
+# Age groups are extremely granular. Bucket them into children (0 - 17), adult (18 - 64), and seniors (65 +)
+
+acs_wide <- acs_wide %>%
+  mutate(
+    age_children = rowSums(
+      select(., matches("sex_by_age_total_(male|female)_(under_5|5_to_9|10_to_14|15_to_17)_years$")),
+      na.rm = TRUE
+    ),
+    age_adults = rowSums(
+      select(., matches("sex_by_age_total_(male|female)_(18_and_19|20|21|22_to_24|25_to_29|30_to_34|35_to_39|40_to_44|45_to_49|50_to_54|55_to_59|60_and_61|62_to_64)_years$")),
+      na.rm = TRUE
+    ),  
+    age_seniors = rowSums(
+      select(., matches("sex_by_age_total_(male|female)_(65_and_66|67_to_69|70_to_74|75_to_79|80_to_84|85_years_and_older)")),
+      na.rm = TRUE      
+    )
+  )
+```
+
+```{r}
+acs_wide <- acs_wide %>%
+  mutate(pct_seniors = age_seniors / sex_by_age_total * 100)
+```
+
+### 3. SharedData Object
+
+Before building a Crosstalk dashboard, take a moment to research what a Crosstalk `SharedData` object is.
+
+**a. Explain how a `SharedData` object differs from a regular data frame.**
+
+A SharedData object wraps a regular data frame and adds two things that the data frame does not have:
+
+- A unique key for each row (used to track which record is selected or highlighted).
+- A group identifier that allows multiple widgets to communicate with each other.
+
+It still contains the original data frame, but now includes the extra metadata needed for Crosstalk’s reactive behavior. A regular data frame is static and has no built-in way to broadcast selections or respond to interactions across widgets.
+
+**b. Describe why `SharedData` is necessary for linking widgets (filters, plots, and tables) to one another in a Crosstalk dashboard.**
+
+`SharedData` makes cross-widget reactivity possible; a plain data frame cannot do that.
+
+`SharedData` is required because Crosstalk uses it as the communication layer between widgets. When a user filters, selects, or highlights points in one widget:
+
+- `SharedData` tracks which rows are active/selected.
+- It broadcasts those changes to every other widget in the same Crosstalk group.
+- Other widgets automatically update to show only the linked subset of data.
+
+Without a `SharedData` wrapper, each widget would operate independently—filters would not affect tables, selections in plots would not highlight rows in tables, and nothing would stay in sync.
+
+**c. Create your own SharedData object.**
+```{r, 3_shareddata_object, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE}
+sd <- SharedData$new(acs_wide, key = ~geoid, group = "state_group")
+```
+
+### 4. Crosstalk-Linked Filter
+Create a filter_select() that filters the dataset by state.
+
+```{r, 4_filter_select, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE}
+state_filter <- filter_select(
+  id = "state_filter",
+  label = "Select a State:",
+  sharedData = sd,
+  group = ~state
+)
+```
+
+**a. How does the filter_select() know which rows to include/exclude?**
+
+It filters based on the keys and current selection stored in the `SharedData` object. When a state is chosen, it marks only the rows whose state value matches the selection as “active.”
+
+**b. Why does it only work when the input is a SharedData object?**
+
+`filter_select()` needs `SharedData` because that’s where Crosstalk keeps the reactive state, including the keys, group, and selected rows. A regular data frame has no mechanism for tracking or broadcasting selections to other widgets.
+
+### 5. Crosstalk Visualization
+
+Using the same `sd` SharedData object:
+
+**a. Create a Plotly bar chart** that displays at least two racial groups.
+
+```{r, 5_race_chart, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE}
+race_plot <- sd %>%
+  plot_ly(
+    x = ~state,
+    y = ~race_total_white_alone,
+    type = "bar",
+    name = "White"
+  ) %>%
+  add_bars(y = ~race_total_black_or_african_american_alone, name = "Black") %>%
+  layout(
+    barmode = "stack",
+    title = "Race Distribution (Absolute Counts)",
+    xaxis = list(title = ""),
+    yaxis = list(title = "Population")
+  )
+```
+
+**b. Place the chart next to your state filter** using the `bscols()` layout function.
+
+```{r 5_layout_chart, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE}
+bscols(
+  widths = c(3, 9),
+  list(
+    h3("Filters"),
+    state_filter
+  ),
+  list(
+    h3("State Race Composition"),
+    race_plot
+  )
+)
+```
+
+
+**c. Add a simple HTML summary box** that shows a reactive metric (e.g., percent seniors).
+
+See the example below. 
+
+This code below creates a static summary box:
+
+```{r, 5_summary_box, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE}
+summary_box <- htmltools::div(
+  style = "
+    background:#eef3f7;
+    padding:18px;
+    border-radius:8px;
+    font-size:18px;
+    width:95%;
+    margin-top:10px;
+  ",
+  htmltools::strong("Percent Senior Population: "),
+  sd$data() %>%
+    mutate(pct_seniors = age_seniors / sex_by_age_total) %>%
+    pull(pct_seniors) %>%
+    mean(na.rm = TRUE) %>%
+    scales::percent()
+)
+
+```
+
+```{r, 5_layout_box, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE}
+bscols(
+  widths = c(3, 9),
+  list(
+    h3("Filters"),
+    state_filter,
+    br(),
+    summary_box
+  ),
+  list(
+    h3("State Race Composition"),
+    race_plot
+  )
+)
+
+```
+
+How can we make it reactive?
+
+```{r, 5_reactive_box, include = TRUE, echo = TRUE, message = FALSE, warning = FALSE}
+# add new variable above the creation of shareddata
+
+# summarywidget
+#devtools::install_github("kent37/summarywidget")
+library(summarywidget)
+
+summary_box_reactive <- htmltools::div(
+  style = "
+    background:#eef3f7;
+    padding:18px;
+    border-radius:8px;
+    font-size:18px;
+    width:95%;
+    margin-top:10px;
+    text-align: center;
+  ",
+  htmltools::strong("% Senior Population:"),
+  htmltools::tags$div(
+    summarywidget(sd, statistic = 'mean', "pct_seniors", digits = 1),
+    style="font-size: 2.4em; font-weight: 700; margin-top: 10px;"
+  )
+)
+```
+
+```{r}
+bscols(
+  widths = c(3, 9),
+  list(
+    h3("Filters"),
+    state_filter,
+    br(),
+    summary_box_reactive
+  ),
+  list(
+    h3("State Race Composition"),
+    race_plot
+  )
+)
+```
+
+
+
+
+
+
+
+
+
+
