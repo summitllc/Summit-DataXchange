@@ -5736,10 +5736,12 @@ not?</p></li>
 </div>
 <div id="task-4-create-an-interactive-map" class="section level2">
 <h2>Task 4: Create an Interactive Map</h2>
-<p>Create a leaflet map showing the percentage of renters in each
-state.</p>
+<p>Create a leaflet map showing the percentage of renters in each state.
+You will need new sf data from tigris.</p>
 <p>Add hover or click popups with state names and values.</p>
 <p>Include a legend.</p>
+<pre class="r"><code>states_tigris &lt;- states(cb = TRUE, year = 2024) %&gt;%
+  st_transform(4326)</code></pre>
 <ol style="list-style-type: decimal">
 <li><p>How many shapes (rows) does our data set from the tigris package
 have?</p></li>
