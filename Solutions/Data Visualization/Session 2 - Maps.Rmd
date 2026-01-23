@@ -1,0 +1,448 @@
+---
+title: "Session 2 - Solutions"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(sf)
+library(ggplot2)
+library(usmap)
+library(leaflet)
+library(scales)
+library(tigris)
+options(tigris_use_cache = TRUE)
+```
+
+## Overview
+
+This assignment introduces core mapping concepts in R using state-level U.S. data. You will progress from a static choropleth map to an interactive web map, learning how to join tabular data to spatial geometries and make thoughtful cartographic choices along the way.
+
+## Learning Objectives
+
+By the end of this assignment, you will be able to:
+
+-   Join non-spatial data to spatial geometries
+
+<!-- -->
+
+-   Create a static choropleth map using `ggplot2`
+
+-   Customize map appearance (color scales, labels, projections)
+
+-   Explain tradeoffs in common map design decisions
+
+-   Build an interactive map using `leaflet`
+
+## Data
+
+You are provided with a dataset called `state_data`, containing demographic and housing characteristics for:
+
+-   50 U.S. states
+
+-   Washington, DC
+
+-   Puerto Rico
+
+Each row represents a state or territory, identified by a **GEOID**. You will notice this is the same data from your first assignment. The code to produce `state_data` from `acs_data` is provided for you below:
+
+```{r clean_data}
+acs_data <- read_csv("../../Data/acs_data.csv")
+
+clean_acs_metadata <- function(df) {
+  
+  df_clean <- df %>%
+    rename(variable = name) %>%
+    
+    mutate(
+      label_clean = label %>%
+        str_remove("^Estimate!!") %>%
+        str_replace_all("!!", "_") %>%
+        str_replace_all("[^A-Za-z0-9_ ]", "") %>%
+        str_replace_all(" +", "_") %>%
+        str_to_lower(),
+      
+      concept_clean = concept %>%
+        str_to_lower() %>%
+        str_replace_all("[^a-z0-9 ]", "") %>%
+        str_replace_all(" +", "_"),
+      
+      varname = paste0(concept_clean, "_", label_clean),
+    ) %>%
+  
+    select(geoid, state, varname, estimate) %>%
+    
+    pivot_wider(
+      id_cols = c(geoid, state),
+      names_from = varname,
+      values_from = estimate
+    ) %>%
+    
+    relocate(geoid, state) %>%
+    select(-`NA_NA`) %>% 
+  mutate(
+    pct_owner = tenure_total_owner_occupied / tenure_total,
+    pct_renter = tenure_total_renter_occupied / tenure_total
+  )
+  
+  return(df_clean)
+}
+
+state_data <- clean_acs_metadata(acs_data)
+```
+
+## Task 1: Explore Simple Feature Data
+
+Explore the following data:
+
+```{r}
+us_map()
+```
+
+1.  What is the shape of the data (number of columns and rows)?
+
+Columns: 4 (3 and a geometry)
+Rows: 52 (50 states + PR + DC)
+
+2.  How does the dataset above differ from any other dataset?
+
+It has a multipolygon geometry column. This is a list of spatial objects that make 
+up each state. They are multipolygons because many geographies are not a single shape. 
+They have islands, detached regions, holes, etc. 
+
+Think Michigan or Hawaii.
+
+3.  What is a simple feature object?
+
+A spatial feature object is a data frame where each row represents a real-world 
+feature and includes a geometry column describing its location or shape.
+
+A spatial feature object is just a data frame where one column knows how to draw itself on a map.
+
+4.  What does the `Projected CRS: NAD27` mean?
+
+Coordinated Reference System: North American Datum 1927
+
+This tells us how to map our data. This happens to be quite an old model. 
+
+## Task 2: Join ACS Data with US Geometries
+
+Load U.S. state geometries using the usmap package.
+
+Join your tabular data to the geometries using the `geoid`.
+
+```{r join_data}
+states_joined <- usmap::us_map(regions = "states") %>%
+  left_join(state_data, by = c("fips" = "geoid"))
+```
+
+1.  How many rows does the joined data have?
+
+52
+
+2.  Do you see Washington, DC and Puerto Rico included? Why or why not?
+
+Yes, because we had the data in both datasets, so they joined like any other state. 
+
+## Task 3: Create a Static Choropleth Map
+
+Create a static map showing total population by state.
+
+Use a continuous color scale.
+
+Add a title and legend label.
+
+```{r}
+ggplot(states_joined) +
+  geom_sf(aes(fill = sex_by_age_total), color = "black", linewidth = 0.2) +
+  # scale_fill_viridis_c() +
+  scale_fill_continuous(
+    low = "#FFFFFF",
+    high = "#177BAD",
+    transform = "log10",
+    labels = comma) +
+  # scale_fill_continuous(type = "viridis") +
+  labs(
+    title = "Total Population by State",
+    fill = "Population") +
+  theme_void()
+  # theme_minimal()
+```
+
+1.  What are some things you notice about this map that could possibly be improved?
+Background is distracting, the colors are overwhleming and the diverging scale doesn't 
+really make sense, the legend is hard to read in scientific notation, differences are 
+not super noticeable. 
+
+## Task 4: Create an Interactive Map
+
+Create a leaflet map showing the percentage of renters in each state.
+
+Add hover or click popups with state names and values.
+
+Include a legend.
+
+```{r include=FALSE}
+states_tigris <- states(cb = TRUE, year = 2024) %>%
+  st_transform(4326)
+
+states_joined_leaflet <- states_tigris %>%
+  left_join(state_data, by = c("GEOID" = "geoid")) 
+
+pal <- colorNumeric(
+  palette = "Greens",
+  domain = states_joined_leaflet$pct_renter,
+  na.color = "transparent"
+)
+
+pal_rev <- colorNumeric(
+  palette = "Greens",
+  domain = states_joined_leaflet$pct_renter,
+  na.color = "transparent",
+  reverse = T
+)
+
+leaflet(states_joined_leaflet) %>%
+  addProviderTiles("CartoDB.Positron") %>%
+  addPolygons(
+    fillColor = ~pal(pct_renter),
+    fillOpacity = 1,
+    color = "black",
+    weight = 1,
+    popup = ~paste0(
+      "<strong>", NAME, "</strong><br>",
+      "Renters: ", percent(pct_renter,accuracy = .1))
+    ) %>%
+  addLegend(
+    pal = pal_rev,
+    values = ~pct_renter, 
+    title = "Renters (%)",
+    labFormat = labelFormat(suffix = "%", transform = function(x) 100 * sort(x, decreasing = T))
+    )
+```
+
+1.  How many shapes (rows) does our data set from the tigris package have?
+
+56! It also has territories like Guam, American Samoa, US Vigin Islands, and the 
+Commonwealth of the Northern Mariana Islands.
+
+2.  Why could we not use the data from our us_maps() function that we used earlier?
+
+usmap() has a different projection that leaflet and also applies a custom transformation 
+to Alaska and Hawaii to make an easy to read, US centric map. Leaflet, tigris, and 
+most web maps use WGS 84 CRS or World Geodetic System 1984. This is standard latitude 
+and longitude mapping. 
+
+## Challenge
+
+Go to the [R Graph gallery](https://r-graph-gallery.com/) and the map section. Create a hexbin, cartogram, or bubble map with one or more variables in our dataset.
+
+### Hexbin 
+```{r}
+my_sf <- read_sf("../../Data/us_states_hexgrid.geojson") %>% 
+  left_join(states_joined_leaflet %>% 
+              st_drop_geometry(), by = c("iso3166_2" ="STUSPS")) %>% 
+    mutate(centroid = st_centroid(geometry))
+
+## Plot our data 
+ggplot(my_sf) +
+  geom_sf(aes(fill = pct_renter), color = "white") +
+  scale_fill_distiller(
+    palette = "Greens",
+    direction = 1,
+    labels = scales::percent
+  ) +
+  geom_sf_text(
+    aes(label = iso3166_2, geometry = centroid),
+    size = 3,
+    color = "black",
+    fontface = "bold"
+  ) +
+  labs(
+    title = "Percent of Households that Rent",
+    fill = "Renters (%)"
+  ) +
+  theme_void()
+```
+
+Hexbins sacrifice geography for comparibility.
+
+### Cartogram 
+
+```{r}
+library(cartogram)
+
+states_cartogram <- cartogram_cont(
+  states_joined,
+  weight = "sex_by_age_total",
+  itermax = 5
+)
+
+ggplot(states_cartogram) +
+  geom_sf(aes(fill = pct_renter), color = "white", size = 0.2) +
+  scale_fill_distiller(
+    palette = "Greens",
+    direction = 1,
+    labels = scales::percent
+  ) +
+  labs(
+    title = "Renters by State (Area Scaled by Population)",
+    fill = "Renters (%)"
+  ) +
+  theme_void()
+```
+
+
+### Bubble Map 
+
+```{r}
+# Create centroids
+states_points <- states_joined %>%
+  mutate(
+    centroid = st_centroid(geom),
+    lon = st_coordinates(centroid)[, 1],
+    lat = st_coordinates(centroid)[, 2]
+  )
+
+states_sf <- usmap::us_map(regions = "states")
+
+ggplot(states_points) +
+
+  # base map
+  geom_sf(data = states_sf, fill = "grey95", color = "white") +
+
+  # bubbles
+  geom_point(
+    aes(
+      x = lon,
+      y = lat,
+      size = sex_by_age_total,
+      fill = pct_renter
+    ),
+    shape = 21,        # circle with outline + fill
+    color = "black",   # outline color
+    stroke = 0.5,
+    alpha = 0.8
+  ) +
+
+  # size scale (population)
+  scale_size(
+    range = c(2, 18),
+    labels = scales::comma
+  ) +
+
+  # fill scale (percent renters)
+  scale_fill_distiller(
+    palette = "Greens",
+    direction = 1,
+    labels = scales::percent
+  ) +
+
+  labs(
+    title = "Renters by State",
+    subtitle = "Bubble size = population, color = % renting",
+    size = "Population",
+    fill = "Renters (%)"
+  ) +
+  
+    # Force the size legend bubbles to be green
+  guides(
+    size = guide_legend(
+      override.aes = list(
+        fill = "#4DAF4A",   # mid green
+        color = "black"
+      )
+    )
+  ) +
+
+  coord_sf() +
+  theme_void()
+
+```
+
+## Faceted Maps
+
+```{r}
+census_2010 <- read_csv("../../Data/Census Data 2010.csv") %>% 
+  mutate(year = 2010) %>% 
+  select(-'year == 2010')
+census_2015 <- read_csv("../../Data/Census Data 2015.csv") %>% 
+  mutate(year = 2015) %>% 
+  select(-'year == 2015')
+census_2020 <- read_csv("../../Data/Census Data 2020.csv") %>% 
+  mutate(year = 2020) 
+census_2023 <- read_csv("../../Data/Census Data 2023.csv") %>% 
+  mutate(year = 2023)
+
+census_tot <- rbind(census_2010,
+                    census_2015,
+                    census_2020,
+                    # census_2021
+                    # census_2022,
+                    census_2023) %>% 
+  rename(geoid = GEOID,
+         state = NAME)
+
+clean_acs_metadata <- function(df) {
+  
+  df_clean <- df %>%
+    rename(variable = name) %>%
+    
+    mutate(
+      label_clean = label %>%
+        str_remove("^Estimate!!") %>%
+        str_replace_all("!!", "_") %>%
+        str_replace_all("[^A-Za-z0-9_ ]", "") %>%
+        str_replace_all(" +", "_") %>%
+        str_to_lower(),
+      
+      concept_clean = concept %>%
+        str_to_lower() %>%
+        str_replace_all("[^a-z0-9 ]", "") %>%
+        str_replace_all(" +", "_"),
+      
+      varname = paste0(concept_clean, "_", label_clean),
+    ) %>%
+  
+    select(year, geoid, state, varname, estimate) %>%
+    
+    pivot_wider(
+      id_cols = c(year, geoid, state),
+      names_from = varname,
+      values_from = estimate
+    ) %>%
+    
+    relocate(geoid, state) %>%
+    select(-`NA_NA`) %>% 
+  mutate(
+    pct_owner = tenure_total_owner_occupied / tenure_total,
+    pct_renter = tenure_total_renter_occupied / tenure_total
+  )
+  
+  return(df_clean)
+}
+
+
+census_tot_clean <- clean_acs_metadata(census_tot)
+
+census_tot_clean <- states_sf %>%
+  filter(abbr %in% c("DC")) %>% 
+  left_join(census_tot_clean, by = c("fips" = "geoid")) 
+
+
+pop <- ggplot(census_tot_clean) +
+  geom_sf(aes(fill = pct_renter), color = "black", linewidth = 0.2) +
+  scale_fill_distiller(
+    palette = "Purples",
+    direction = 1,
+    labels = scales::percent
+  ) +
+  labs(
+    title = "Percent Renters in the District",
+    fill = "Renter (%)") +
+  theme_void()
+
+pop +
+  facet_wrap(~year)
+```
